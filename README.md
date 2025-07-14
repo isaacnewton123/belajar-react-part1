@@ -4,8 +4,8 @@ Dokumentasi ini menjelaskan setiap endpoint yang tersedia di backend aplikasi To
 
 **Base URL**
 
--   **Lokal:** `http://localhost:8080`
--   **Produksi:** `http://api.fidodating.xyz`
+
+-   **Domain:** `https://fidodating.xyz`
 
 Semua request dan response body menggunakan format `JSON`.
 
