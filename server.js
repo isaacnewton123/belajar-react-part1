@@ -1,137 +1,275 @@
 // server.js
-require('dotenv').config();
+// Ini adalah file utama untuk server Node.js
 
-// --- 1. Impor Modul ---
-const express = require('express');
-const cors = require('cors');
-const mongoose = require('mongoose'); // Library untuk berinteraksi dengan MongoDB
+// Import modul-modul yang dibutuhkan
+const express = require('express'); // Framework web untuk Node.js
+const mongoose = require('mongoose'); // ODM (Object Data Modeling) untuk MongoDB
+const bcrypt = require('bcryptjs'); // Untuk hashing password
+const jwt = require('jsonwebtoken'); // Untuk otentikasi berbasis token
+const cors = require('cors'); // Untuk mengizinkan permintaan dari domain yang berbeda
+const dotenv = require('dotenv'); // Untuk memuat variabel lingkungan dari file .env
 
-// --- 2. Inisialisasi & Konfigurasi ---
+// Muat variabel lingkungan dari file .env
+dotenv.config();
+
+// Inisialisasi aplikasi Express
 const app = express();
-const PORT = process.env.PORT || 8080;
 
-// URL koneksi ke database MongoDB Anda.
-// Sangat disarankan untuk menggunakan environment variable untuk ini.
-// Contoh: mongodb://localhost:27017/todolistapp
-const MONGO_URI = process.env.MONGO_URI || 'mongodb://127.0.0.1:27017/todolistapp';
+// Middleware
+app.use(cors()); // Mengizinkan semua permintaan lintas domain
+app.use(express.json()); // Mengizinkan aplikasi untuk mengurai JSON dari body request
 
-// --- 3. Middleware ---
-app.use(cors());
-app.use(express.json());
+// Konfigurasi Database MongoDB
+const mongoUri = process.env.MONGO_URI || 'mongodb://localhost:27017/taskmanager_db';
 
-// --- 4. Koneksi ke Database MongoDB ---
-mongoose.connect(MONGO_URI)
-  .then(() => {
-    console.log('✅ Berhasil terhubung ke MongoDB');
-    // Jalankan server HANYA setelah koneksi database berhasil
-    app.listen(PORT, () => {
-      console.log(`🚀 Server berjalan di http://localhost:${PORT}`);
-      console.log(`API akan tersedia untuk domain: fidodating.xyz (via CORS)`);
-    });
-  })
-  .catch(err => {
-    console.error('❌ Gagal terhubung ke MongoDB', err);
-    process.exit(1); // Keluar dari proses jika tidak bisa terhubung ke DB
+mongoose.connect(mongoUri)
+  .then(() => console.log('Terhubung ke MongoDB!'))
+  .then(() => console.log('Database URL:', mongoUri)) // Tambahkan log untuk URI
+  .catch(err => console.error('Gagal terhubung ke MongoDB:', err));
+
+// --- Definisi Schema dan Model MongoDB ---
+
+// Schema Pengguna
+const userSchema = new mongoose.Schema({
+  username: { type: String, required: true, unique: true },
+  password: { type: String, required: true },
+});
+
+// Middleware Mongoose untuk hashing password sebelum menyimpan
+userSchema.pre('save', async function(next) {
+  if (this.isModified('password')) {
+    this.password = await bcrypt.hash(this.password, 10);
+  }
+  next();
+});
+
+const User = mongoose.model('User', userSchema);
+
+// Schema Kategori
+const categorySchema = new mongoose.Schema({
+  name: { type: String, required: true, unique: true },
+  user: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true } // Kategori milik pengguna tertentu
+});
+const Category = mongoose.model('Category', categorySchema);
+
+// Schema Tugas
+const taskSchema = new mongoose.Schema({
+  title: { type: String, required: true },
+  description: { type: String },
+  completed: { type: Boolean, default: false },
+  category: { type: mongoose.Schema.Types.ObjectId, ref: 'Category', default: null }, // Tugas bisa punya kategori
+  user: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true }, // Tugas milik pengguna tertentu
+  createdAt: { type: Date, default: Date.now },
+});
+const Task = mongoose.model('Task', taskSchema);
+
+// --- Middleware Autentikasi ---
+const authenticateToken = (req, res, next) => {
+  const authHeader = req.headers['authorization'];
+  const token = authHeader && authHeader.split(' ')[1]; // Ambil token dari header 'Bearer TOKEN'
+
+  if (token == null) return res.sendStatus(401); // Jika tidak ada token, kembalikan 401 Unauthorized
+
+  jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
+    if (err) return res.sendStatus(403); // Jika token tidak valid, kembalikan 403 Forbidden
+    req.user = user; // Tambahkan payload user ke objek request
+    next(); // Lanjutkan ke handler route berikutnya
   });
+};
 
-// --- 5. Skema & Model Mongoose ---
-// Skema mendefinisikan struktur dokumen di dalam collection MongoDB.
+// --- Route API ---
 
-const todoSchema = new mongoose.Schema({
-  title: {
-    type: String,
-    required: true, // Judul wajib ada
-  },
-  notes: {
-    type: String,
-    default: '', // Nilai default jika tidak diisi
-  },
-  completed: {
-    type: Boolean,
-    default: false,
-  },
-  createdAt: {
-    type: Date,
-    default: Date.now,
-  },
+// Route Root (untuk testing server)
+app.get('/', (req, res) => {
+  res.send('Backend Aplikasi Manajemen Tugas Berjalan!');
 });
 
-// MongoDB secara otomatis akan menggunakan nama 'todos' (bentuk jamak dari 'Todo')
-// sebagai nama collection di database.
-const Todo = mongoose.model('Todo', todoSchema);
+// --- Route Autentikasi ---
 
-
-// --- 6. Definisi Rute (API Endpoints) dengan Logika MongoDB ---
-// Semua fungsi handler diubah menjadi async/await untuk menangani operasi database.
-
-// GET /api/todos -> Mendapatkan semua tugas
-app.get('/api/todos', async (req, res) => {
+// Registrasi Pengguna Baru
+app.post('/api/register', async (req, res) => {
   try {
-    const todos = await Todo.find().sort({ createdAt: -1 }); // Ambil semua data & urutkan dari yang terbaru
-    res.json(todos);
-  } catch (error) {
-    res.status(500).json({ message: 'Server Error', error });
+    const { username, password } = req.body;
+    const user = new User({ username, password });
+    await user.save();
+    res.status(201).json({ message: 'Pengguna berhasil terdaftar.' });
+  } catch (err) {
+    if (err.code === 11000) { // Kode error MongoDB untuk duplikasi kunci (unique)
+      return res.status(400).json({ message: 'Nama pengguna sudah ada.' });
+    }
+    res.status(500).json({ message: 'Gagal mendaftarkan pengguna.', error: err.message });
   }
 });
 
-// POST /api/todos -> Membuat tugas baru
-app.post('/api/todos', async (req, res) => {
+// Login Pengguna
+app.post('/api/login', async (req, res) => {
   try {
-    const { title, notes } = req.body;
+    const { username, password } = req.body;
+    const user = await User.findOne({ username });
 
-    if (!title) {
-      return res.status(400).json({ message: 'Judul tugas tidak boleh kosong' });
+    if (!user) {
+      return res.status(400).json({ message: 'Nama pengguna atau password salah.' });
     }
 
-    // Buat dokumen baru menggunakan Model Todo
-    const newTodo = new Todo({
-      title,
-      notes,
-    });
+    const isMatch = await bcrypt.compare(password, user.password);
+    if (!isMatch) {
+      return res.status(400).json({ message: 'Nama pengguna atau password salah.' });
+    }
 
-    const savedTodo = await newTodo.save(); // Simpan ke database
-    res.status(201).json(savedTodo);
-  } catch (error) {
-    res.status(500).json({ message: 'Server Error', error });
+    // Buat token JWT
+    const token = jwt.sign({ id: user._id, username: user.username }, process.env.JWT_SECRET, { expiresIn: '1h' });
+    res.json({ message: 'Login berhasil!', token, userId: user._id, username: user.username });
+  } catch (err) {
+    res.status(500).json({ message: 'Gagal login.', error: err.message });
   }
 });
 
-// PUT /api/todos/:id -> Mengupdate tugas
-app.put('/api/todos/:id', async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { title, notes, completed } = req.body;
+// --- Route Kategori (Membutuhkan Autentikasi) ---
 
-    // Cari dan update todo berdasarkan ID.
-    // { new: true } akan mengembalikan dokumen yang sudah diupdate.
-    const updatedTodo = await Todo.findByIdAndUpdate(
-      id,
-      { title, notes, completed },
-      { new: true, runValidators: true }
+// Mendapatkan semua kategori untuk pengguna yang terautentikasi
+app.get('/api/categories', authenticateToken, async (req, res) => {
+  try {
+    const categories = await Category.find({ user: req.user.id });
+    res.json(categories);
+  } catch (err) {
+    res.status(500).json({ message: 'Gagal mendapatkan kategori.', error: err.message });
+  }
+});
+
+// Membuat kategori baru
+app.post('/api/categories', authenticateToken, async (req, res) => {
+  try {
+    const { name } = req.body;
+    const newCategory = new Category({ name, user: req.user.id });
+    await newCategory.save();
+    res.status(201).json(newCategory);
+  } catch (err) {
+    if (err.code === 11000) {
+        return res.status(400).json({ message: 'Nama kategori sudah ada.' });
+    }
+    res.status(500).json({ message: 'Gagal membuat kategori.', error: err.message });
+  }
+});
+
+// Mengupdate kategori berdasarkan ID
+app.put('/api/categories/:id', authenticateToken, async (req, res) => {
+  try {
+    const { name } = req.body;
+    const updatedCategory = await Category.findOneAndUpdate(
+      { _id: req.params.id, user: req.user.id },
+      { name },
+      { new: true } // Mengembalikan dokumen yang sudah diupdate
     );
-
-    if (!updatedTodo) {
-      return res.status(404).json({ message: 'Tugas tidak ditemukan' });
+    if (!updatedCategory) {
+      return res.status(404).json({ message: 'Kategori tidak ditemukan atau Anda tidak memiliki akses.' });
     }
-
-    res.json(updatedTodo);
-  } catch (error) {
-    res.status(500).json({ message: 'Server Error', error });
+    res.json(updatedCategory);
+  } catch (err) {
+    res.status(500).json({ message: 'Gagal mengupdate kategori.', error: err.message });
   }
 });
 
-// DELETE /api/todos/:id -> Menghapus tugas
-app.delete('/api/todos/:id', async (req, res) => {
+// Menghapus kategori berdasarkan ID
+app.delete('/api/categories/:id', authenticateToken, async (req, res) => {
   try {
-    const { id } = req.params;
-    const deletedTodo = await Todo.findByIdAndDelete(id);
+    const deletedCategory = await Category.findOneAndDelete({ _id: req.params.id, user: req.user.id });
+    if (!deletedCategory) {
+      return res.status(404).json({ message: 'Kategori tidak ditemukan atau Anda tidak memiliki akses.' });
+    }
+    res.json({ message: 'Kategori berhasil dihapus.' });
+  } catch (err) {
+    res.status(500).json({ message: 'Gagal menghapus kategori.', error: err.message });
+  }
+});
 
-    if (!deletedTodo) {
-      return res.status(404).json({ message: 'Tugas tidak ditemukan' });
+// --- Route Tugas (Membutuhkan Autentikasi) ---
+
+// Mendapatkan semua tugas untuk pengguna yang terautentikasi (opsional filter berdasarkan kategori)
+app.get('/api/tasks', authenticateToken, async (req, res) => {
+  try {
+    const { categoryId, completed } = req.query; // Ambil filter dari query params
+    let query = { user: req.user.id };
+
+    if (categoryId) {
+      query.category = categoryId;
+    }
+    if (completed !== undefined) {
+      query.completed = completed === 'true'; // Konversi string 'true'/'false' ke boolean
     }
 
-    res.status(204).send(); // Sukses, tidak ada konten yang dikembalikan
-  } catch (error) {
-    res.status(500).json({ message: 'Server Error', error });
+    const tasks = await Task.find(query).populate('category', 'name'); // Populate nama kategori
+    res.json(tasks);
+  } catch (err) {
+    res.status(500).json({ message: 'Gagal mendapatkan tugas.', error: err.message });
   }
+});
+
+// Membuat tugas baru
+app.post('/api/tasks', authenticateToken, async (req, res) => {
+  try {
+    const { title, description, categoryId } = req.body;
+    const newTask = new Task({
+      title,
+      description,
+      category: categoryId || null, // Jika categoryId tidak ada, set null
+      user: req.user.id,
+    });
+    await newTask.save();
+    // Setelah disimpan, populate kembali untuk mendapatkan objek kategori jika ada
+    await newTask.populate('category', 'name');
+    res.status(201).json(newTask);
+  } catch (err) {
+    res.status(500).json({ message: 'Gagal membuat tugas.', error: err.message });
+  }
+});
+
+// Mendapatkan tugas berdasarkan ID
+app.get('/api/tasks/:id', authenticateToken, async (req, res) => {
+  try {
+    const task = await Task.findOne({ _id: req.params.id, user: req.user.id }).populate('category', 'name');
+    if (!task) {
+      return res.status(404).json({ message: 'Tugas tidak ditemukan atau Anda tidak memiliki akses.' });
+    }
+    res.json(task);
+  } catch (err) {
+    res.status(500).json({ message: 'Gagal mendapatkan tugas.', error: err.message });
+  }
+});
+
+// Mengupdate tugas berdasarkan ID
+app.put('/api/tasks/:id', authenticateToken, async (req, res) => {
+  try {
+    const { title, description, completed, categoryId } = req.body;
+    const updatedTask = await Task.findOneAndUpdate(
+      { _id: req.params.id, user: req.user.id },
+      { title, description, completed, category: categoryId || null },
+      { new: true }
+    ).populate('category', 'name');
+
+    if (!updatedTask) {
+      return res.status(404).json({ message: 'Tugas tidak ditemukan atau Anda tidak memiliki akses.' });
+    }
+    res.json(updatedTask);
+  } catch (err) {
+    res.status(500).json({ message: 'Gagal mengupdate tugas.', error: err.message });
+  }
+});
+
+// Menghapus tugas berdasarkan ID
+app.delete('/api/tasks/:id', authenticateToken, async (req, res) => {
+  try {
+    const deletedTask = await Task.findOneAndDelete({ _id: req.params.id, user: req.user.id });
+    if (!deletedTask) {
+      return res.status(404).json({ message: 'Tugas tidak ditemukan atau Anda tidak memiliki akses.' });
+    }
+    res.json({ message: 'Tugas berhasil dihapus.' });
+  } catch (err) {
+    res.status(500).json({ message: 'Gagal menghapus tugas.', error: err.message });
+  }
+});
+
+// --- Start Server ---
+const PORT = process.env.PORT || 8080;
+app.listen(PORT, () => {
+  console.log(`Server berjalan di port ${PORT}`);
 });
