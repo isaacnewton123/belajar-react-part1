@@ -4,6 +4,16 @@ Backend ini menyediakan API RESTful untuk aplikasi manajemen tugas, dibangun den
 
 ---
 
+
+**Base URL**
+
+
+-   **Domain:** `https://fidodating.xyz`
+
+Semua request dan response body menggunakan format `JSON`.
+
+---
+
 ## Daftar Isi
 
 1.  [Fitur](#1-fitur)
