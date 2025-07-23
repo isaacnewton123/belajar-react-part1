@@ -47,13 +47,13 @@ npm start
 npm run dev
 ```
 
-Server akan berjalan di `http://localhost:5000`
+Server akan berjalan di `https://fidodating.xyz`
 
 ## 📚 API Documentation
 
 ### Base URL
 ```
-http://localhost:5000/api
+https://fidodating.xyz/api
 ```
 
 ### Headers
@@ -471,7 +471,7 @@ Menampilkan posts dari user yang difollow dan posts sendiri.
 - **Maksimal ukuran**: 5MB
 - **Format yang didukung**: JPG, JPEG, PNG, GIF
 - **Folder penyimpanan**: `/uploads`
-- **URL akses**: `http://localhost:5000/uploads/filename.jpg`
+- **URL akses**: `https://fidodating.xyz/uploads/filename.jpg`
 
 ---
 
@@ -528,7 +528,7 @@ npm install axios
 // src/services/api.js
 import axios from 'axios';
 
-const API_BASE_URL = 'http://localhost:5000/api';
+const API_BASE_URL = 'https://fidodating.xyz/api';
 
 const api = axios.create({
   baseURL: API_BASE_URL,
@@ -643,7 +643,7 @@ API ini menggunakan in-memory storage (array JavaScript) untuk menyimpan data. D
 ### Environment Variables
 Untuk production, buat file `.env`:
 ```
-PORT=5000
+PORT=8080
 JWT_SECRET=your-super-secret-jwt-key
 NODE_ENV=production
 ```
