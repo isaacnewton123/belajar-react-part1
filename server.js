@@ -1,179 +1,628 @@
 // server.js
-// File utama untuk server backend mini media sosial
-
 const express = require('express');
-const mongoose = require('mongoose');
+const cors = require('cors');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
-const cors = require('cors');
-const dotenv = require('dotenv');
+const multer = require('multer');
+const path = require('path');
+const fs = require('fs');
 
-// Muat variabel lingkungan dari file .env
-dotenv.config();
-
-// Inisialisasi aplikasi Express
 const app = express();
+const PORT = process.env.PORT || 5000;
+const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key';
 
 // Middleware
 app.use(cors());
 app.use(express.json());
+app.use('/uploads', express.static('uploads'));
 
-// Koneksi ke MongoDB
-const mongoUri = process.env.MONGO_URI || 'mongodb://localhost:27017/mini_social_db';
-mongoose.connect(mongoUri)
-  .then(() => console.log('Terhubung ke MongoDB!'))
-  .catch(err => console.error('Gagal terhubung ke MongoDB:', err));
+// Create uploads directory if it doesn't exist
+if (!fs.existsSync('uploads')) {
+  fs.mkdirSync('uploads');
+}
 
-// --- Skema dan Model MongoDB ---
-
-// Skema Pengguna
-const userSchema = new mongoose.Schema({
-  username: { type: String, required: true, unique: true },
-  password: { type: String, required: true },
-  name: { type: String, required: true },
-  bio: { type: String, default: '' },
-});
-userSchema.pre('save', async function(next) {
-  if (this.isModified('password')) {
-    this.password = await bcrypt.hash(this.password, 10);
+// Configure multer for file uploads
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    cb(null, 'uploads/');
+  },
+  filename: (req, file, cb) => {
+    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+    cb(null, file.fieldname + '-' + uniqueSuffix + path.extname(file.originalname));
   }
-  next();
 });
-const User = mongoose.model('User', userSchema);
 
-// Skema Posting
-const postSchema = new mongoose.Schema({
-  content: { type: String, required: true },
-  user: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
-  createdAt: { type: Date, default: Date.now },
+const upload = multer({
+  storage: storage,
+  limits: {
+    fileSize: 5 * 1024 * 1024, // 5MB limit
+  },
+  fileFilter: (req, file, cb) => {
+    if (file.mimetype.startsWith('image/')) {
+      cb(null, true);
+    } else {
+      cb(new Error('Only image files are allowed!'), false);
+    }
+  }
 });
-const Post = mongoose.model('Post', postSchema);
 
-// Skema Komentar
-const commentSchema = new mongoose.Schema({
-  content: { type: String, required: true },
-  user: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
-  post: { type: mongoose.Schema.Types.ObjectId, ref: 'Post', required: true },
-  createdAt: { type: Date, default: Date.now },
-});
-const Comment = mongoose.model('Comment', commentSchema);
+// In-memory database (in production, use a real database like MongoDB or PostgreSQL)
+let users = [];
+let posts = [];
+let comments = [];
+let likes = [];
+let follows = [];
 
-// --- Middleware Autentikasi ---
+// Helper functions
+const generateId = () => Date.now().toString() + Math.random().toString(36).substr(2, 9);
+
 const authenticateToken = (req, res, next) => {
   const authHeader = req.headers['authorization'];
   const token = authHeader && authHeader.split(' ')[1];
-  if (!token) return res.sendStatus(401);
 
-  jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
-    if (err) return res.sendStatus(403);
+  if (!token) {
+    return res.status(401).json({ error: 'Access token required' });
+  }
+
+  jwt.verify(token, JWT_SECRET, (err, user) => {
+    if (err) {
+      return res.status(403).json({ error: 'Invalid token' });
+    }
     req.user = user;
     next();
   });
 };
 
-// --- Route API ---
-
-// Root Route
-app.get('/', (req, res) => {
-  res.send('Backend Mini Media Sosial Berjalan!');
-});
-
-// --- Autentikasi ---
-app.post('/api/register', async (req, res) => {
+// Auth Routes
+app.post('/api/auth/register', async (req, res) => {
   try {
-    const { username, password, name } = req.body;
-    const user = new User({ username, password, name });
-    await user.save();
-    res.status(201).json({ message: 'Pengguna berhasil terdaftar.' });
-  } catch (err) {
-    if (err.code === 11000) {
-      return res.status(400).json({ message: 'Nama pengguna sudah ada.' });
+    const { username, email, password, fullName } = req.body;
+
+    if (!username || !email || !password || !fullName) {
+      return res.status(400).json({ error: 'All fields are required' });
     }
-    res.status(500).json({ message: 'Gagal mendaftar.', error: err.message });
-  }
-});
 
-app.post('/api/login', async (req, res) => {
-  try {
-    const { username, password } = req.body;
-    const user = await User.findOne({ username });
-    if (!user || !(await bcrypt.compare(password, user.password))) {
-      return res.status(400).json({ message: 'Nama pengguna atau password salah.' });
+    // Check if user already exists
+    const existingUser = users.find(u => u.email === email || u.username === username);
+    if (existingUser) {
+      return res.status(400).json({ error: 'User already exists' });
     }
-    const token = jwt.sign({ id: user._id, username: user.username }, process.env.JWT_SECRET, { expiresIn: '1h' });
-    res.json({ message: 'Login berhasil!', token, userId: user._id, username: user.username });
-  } catch (err) {
-    res.status(500).json({ message: 'Gagal login.', error: err.message });
+
+    // Hash password
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    // Create user
+    const user = {
+      id: generateId(),
+      username,
+      email,
+      fullName,
+      password: hashedPassword,
+      bio: '',
+      avatar: null,
+      createdAt: new Date().toISOString(),
+      followersCount: 0,
+      followingCount: 0,
+      postsCount: 0
+    };
+
+    users.push(user);
+
+    // Generate token
+    const token = jwt.sign({ id: user.id, username: user.username }, JWT_SECRET);
+
+    res.status(201).json({
+      message: 'User created successfully',
+      token,
+      user: {
+        id: user.id,
+        username: user.username,
+        email: user.email,
+        fullName: user.fullName,
+        bio: user.bio,
+        avatar: user.avatar,
+        followersCount: user.followersCount,
+        followingCount: user.followingCount,
+        postsCount: user.postsCount
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Server error' });
   }
 });
 
-// --- Posting Status ---
-app.get('/api/posts', async (req, res) => {
+app.post('/api/auth/login', async (req, res) => {
   try {
-    const posts = await Post.find().populate('user', 'username name');
-    res.json(posts);
-  } catch (err) {
-    res.status(500).json({ message: 'Gagal mendapatkan posting.', error: err.message });
+    const { email, password } = req.body;
+
+    if (!email || !password) {
+      return res.status(400).json({ error: 'Email and password are required' });
+    }
+
+    // Find user
+    const user = users.find(u => u.email === email);
+    if (!user) {
+      return res.status(400).json({ error: 'Invalid credentials' });
+    }
+
+    // Check password
+    const isValidPassword = await bcrypt.compare(password, user.password);
+    if (!isValidPassword) {
+      return res.status(400).json({ error: 'Invalid credentials' });
+    }
+
+    // Generate token
+    const token = jwt.sign({ id: user.id, username: user.username }, JWT_SECRET);
+
+    res.json({
+      message: 'Login successful',
+      token,
+      user: {
+        id: user.id,
+        username: user.username,
+        email: user.email,
+        fullName: user.fullName,
+        bio: user.bio,
+        avatar: user.avatar,
+        followersCount: user.followersCount,
+        followingCount: user.followingCount,
+        postsCount: user.postsCount
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Server error' });
   }
 });
 
-app.post('/api/posts', authenticateToken, async (req, res) => {
-  try {
-    const { content } = req.body;
-    const post = new Post({ content, user: req.user.id });
-    await post.save();
-    await post.populate('user', 'username name');
-    res.status(201).json(post);
-  } catch (err) {
-    res.status(500).json({ message: 'Gagal membuat posting.', error: err.message });
+// User Routes
+app.get('/api/users/profile', authenticateToken, (req, res) => {
+  const user = users.find(u => u.id === req.user.id);
+  if (!user) {
+    return res.status(404).json({ error: 'User not found' });
   }
+
+  res.json({
+    id: user.id,
+    username: user.username,
+    email: user.email,
+    fullName: user.fullName,
+    bio: user.bio,
+    avatar: user.avatar,
+    followersCount: user.followersCount,
+    followingCount: user.followingCount,
+    postsCount: user.postsCount,
+    createdAt: user.createdAt
+  });
 });
 
-app.delete('/api/posts/:id', authenticateToken, async (req, res) => {
-  try {
-    const post = await Post.findOneAndDelete({ _id: req.params.id, user: req.user.id });
-    if (!post) return res.status(404).json({ message: 'Posting tidak ditemukan atau Anda tidak memiliki akses.' });
-    res.json({ message: 'Posting berhasil dihapus.' });
-  } catch (err) {
-    res.status(500).json({ message: 'Gagal menghapus posting.', error: err.message });
+app.put('/api/users/profile', authenticateToken, upload.single('avatar'), (req, res) => {
+  const { fullName, bio } = req.body;
+  const userIndex = users.findIndex(u => u.id === req.user.id);
+  
+  if (userIndex === -1) {
+    return res.status(404).json({ error: 'User not found' });
   }
+
+  if (fullName) users[userIndex].fullName = fullName;
+  if (bio !== undefined) users[userIndex].bio = bio;
+  if (req.file) users[userIndex].avatar = req.file.filename;
+
+  const user = users[userIndex];
+  res.json({
+    id: user.id,
+    username: user.username,
+    email: user.email,
+    fullName: user.fullName,
+    bio: user.bio,
+    avatar: user.avatar,
+    followersCount: user.followersCount,
+    followingCount: user.followingCount,
+    postsCount: user.postsCount
+  });
 });
 
-// --- Komentar ---
-app.get('/api/posts/:id/comments', async (req, res) => {
-  try {
-    const comments = await Comment.find({ post: req.params.id }).populate('user', 'username name');
-    res.json(comments);
-  } catch (err) {
-    res.status(500).json({ message: 'Gagal mendapatkan komentar.', error: err.message });
+app.get('/api/users/:username', authenticateToken, (req, res) => {
+  const user = users.find(u => u.username === req.params.username);
+  if (!user) {
+    return res.status(404).json({ error: 'User not found' });
   }
+
+  const isFollowing = follows.some(f => f.followerId === req.user.id && f.followingId === user.id);
+
+  res.json({
+    id: user.id,
+    username: user.username,
+    fullName: user.fullName,
+    bio: user.bio,
+    avatar: user.avatar,
+    followersCount: user.followersCount,
+    followingCount: user.followingCount,
+    postsCount: user.postsCount,
+    createdAt: user.createdAt,
+    isFollowing
+  });
 });
 
-app.post('/api/posts/:id/comments', authenticateToken, async (req, res) => {
-  try {
-    const { content } = req.body;
-    const comment = new Comment({ content, user: req.user.id, post: req.params.id });
-    await comment.save();
-    await comment.populate('user', 'username name');
-    res.status(201).json(comment);
-  } catch (err) {
-    res.status(500).json({ message: 'Gagal menambahkan komentar.', error: err.message });
+// Follow/Unfollow Routes
+app.post('/api/users/:userId/follow', authenticateToken, (req, res) => {
+  const targetUserId = req.params.userId;
+  const currentUserId = req.user.id;
+
+  if (targetUserId === currentUserId) {
+    return res.status(400).json({ error: 'Cannot follow yourself' });
   }
+
+  const targetUser = users.find(u => u.id === targetUserId);
+  if (!targetUser) {
+    return res.status(404).json({ error: 'User not found' });
+  }
+
+  const existingFollow = follows.find(f => f.followerId === currentUserId && f.followingId === targetUserId);
+  if (existingFollow) {
+    return res.status(400).json({ error: 'Already following this user' });
+  }
+
+  follows.push({
+    id: generateId(),
+    followerId: currentUserId,
+    followingId: targetUserId,
+    createdAt: new Date().toISOString()
+  });
+
+  // Update counts
+  const currentUserIndex = users.findIndex(u => u.id === currentUserId);
+  const targetUserIndex = users.findIndex(u => u.id === targetUserId);
+  
+  users[currentUserIndex].followingCount++;
+  users[targetUserIndex].followersCount++;
+
+  res.json({ message: 'User followed successfully' });
 });
 
-// --- Profil Pengguna ---
-app.get('/api/users/:id', async (req, res) => {
-  try {
-    const user = await User.findById(req.params.id).select('username name bio');
-    if (!user) return res.status(404).json({ message: 'Pengguna tidak ditemukan.' });
-    res.json(user);
-  } catch (err) {
-    res.status(500).json({ message: 'Gagal mendapatkan profil.', error: err.message });
+app.delete('/api/users/:userId/follow', authenticateToken, (req, res) => {
+  const targetUserId = req.params.userId;
+  const currentUserId = req.user.id;
+
+  const followIndex = follows.findIndex(f => f.followerId === currentUserId && f.followingId === targetUserId);
+  if (followIndex === -1) {
+    return res.status(400).json({ error: 'Not following this user' });
   }
+
+  follows.splice(followIndex, 1);
+
+  // Update counts
+  const currentUserIndex = users.findIndex(u => u.id === currentUserId);
+  const targetUserIndex = users.findIndex(u => u.id === targetUserId);
+  
+  users[currentUserIndex].followingCount--;
+  users[targetUserIndex].followersCount--;
+
+  res.json({ message: 'User unfollowed successfully' });
 });
 
-// --- Jalankan Server ---
-const PORT = process.env.PORT || 8080;
+// Post Routes
+app.post('/api/posts', authenticateToken, upload.single('image'), (req, res) => {
+  const { content } = req.body;
+
+  if (!content) {
+    return res.status(400).json({ error: 'Content is required' });
+  }
+
+  const post = {
+    id: generateId(),
+    userId: req.user.id,
+    content,
+    image: req.file ? req.file.filename : null,
+    createdAt: new Date().toISOString(),
+    likesCount: 0,
+    commentsCount: 0
+  };
+
+  posts.unshift(post);
+
+  // Update user posts count
+  const userIndex = users.findIndex(u => u.id === req.user.id);
+  users[userIndex].postsCount++;
+
+  // Add user info to response
+  const user = users[userIndex];
+  res.status(201).json({
+    ...post,
+    user: {
+      id: user.id,
+      username: user.username,
+      fullName: user.fullName,
+      avatar: user.avatar
+    },
+    isLiked: false
+  });
+});
+
+app.get('/api/posts', authenticateToken, (req, res) => {
+  const page = parseInt(req.query.page) || 1;
+  const limit = parseInt(req.query.limit) || 10;
+  const startIndex = (page - 1) * limit;
+  const endIndex = startIndex + limit;
+
+  const postsWithUserInfo = posts.slice(startIndex, endIndex).map(post => {
+    const user = users.find(u => u.id === post.userId);
+    const isLiked = likes.some(l => l.postId === post.id && l.userId === req.user.id);
+    
+    return {
+      ...post,
+      user: {
+        id: user.id,
+        username: user.username,
+        fullName: user.fullName,
+        avatar: user.avatar
+      },
+      isLiked
+    };
+  });
+
+  res.json({
+    posts: postsWithUserInfo,
+    hasMore: endIndex < posts.length,
+    totalPosts: posts.length
+  });
+});
+
+app.get('/api/posts/:postId', authenticateToken, (req, res) => {
+  const post = posts.find(p => p.id === req.params.postId);
+  if (!post) {
+    return res.status(404).json({ error: 'Post not found' });
+  }
+
+  const user = users.find(u => u.id === post.userId);
+  const isLiked = likes.some(l => l.postId === post.id && l.userId === req.user.id);
+
+  res.json({
+    ...post,
+    user: {
+      id: user.id,
+      username: user.username,
+      fullName: user.fullName,
+      avatar: user.avatar
+    },
+    isLiked
+  });
+});
+
+app.delete('/api/posts/:postId', authenticateToken, (req, res) => {
+  const postIndex = posts.findIndex(p => p.id === req.params.postId);
+  if (postIndex === -1) {
+    return res.status(404).json({ error: 'Post not found' });
+  }
+
+  const post = posts[postIndex];
+  if (post.userId !== req.user.id) {
+    return res.status(403).json({ error: 'Not authorized to delete this post' });
+  }
+
+  posts.splice(postIndex, 1);
+
+  // Update user posts count
+  const userIndex = users.findIndex(u => u.id === req.user.id);
+  users[userIndex].postsCount--;
+
+  // Remove associated likes and comments
+  likes = likes.filter(l => l.postId !== req.params.postId);
+  comments = comments.filter(c => c.postId !== req.params.postId);
+
+  res.json({ message: 'Post deleted successfully' });
+});
+
+// Like Routes
+app.post('/api/posts/:postId/like', authenticateToken, (req, res) => {
+  const postId = req.params.postId;
+  const userId = req.user.id;
+
+  const post = posts.find(p => p.id === postId);
+  if (!post) {
+    return res.status(404).json({ error: 'Post not found' });
+  }
+
+  const existingLike = likes.find(l => l.postId === postId && l.userId === userId);
+  if (existingLike) {
+    return res.status(400).json({ error: 'Post already liked' });
+  }
+
+  likes.push({
+    id: generateId(),
+    postId,
+    userId,
+    createdAt: new Date().toISOString()
+  });
+
+  // Update post likes count
+  const postIndex = posts.findIndex(p => p.id === postId);
+  posts[postIndex].likesCount++;
+
+  res.json({ message: 'Post liked successfully' });
+});
+
+app.delete('/api/posts/:postId/like', authenticateToken, (req, res) => {
+  const postId = req.params.postId;
+  const userId = req.user.id;
+
+  const likeIndex = likes.findIndex(l => l.postId === postId && l.userId === userId);
+  if (likeIndex === -1) {
+    return res.status(400).json({ error: 'Post not liked' });
+  }
+
+  likes.splice(likeIndex, 1);
+
+  // Update post likes count
+  const postIndex = posts.findIndex(p => p.id === postId);
+  posts[postIndex].likesCount--;
+
+  res.json({ message: 'Post unliked successfully' });
+});
+
+// Comment Routes
+app.post('/api/posts/:postId/comments', authenticateToken, (req, res) => {
+  const { content } = req.body;
+  const postId = req.params.postId;
+
+  if (!content) {
+    return res.status(400).json({ error: 'Content is required' });
+  }
+
+  const post = posts.find(p => p.id === postId);
+  if (!post) {
+    return res.status(404).json({ error: 'Post not found' });
+  }
+
+  const comment = {
+    id: generateId(),
+    postId,
+    userId: req.user.id,
+    content,
+    createdAt: new Date().toISOString()
+  };
+
+  comments.push(comment);
+
+  // Update post comments count
+  const postIndex = posts.findIndex(p => p.id === postId);
+  posts[postIndex].commentsCount++;
+
+  // Add user info to response
+  const user = users.find(u => u.id === req.user.id);
+  res.status(201).json({
+    ...comment,
+    user: {
+      id: user.id,
+      username: user.username,
+      fullName: user.fullName,
+      avatar: user.avatar
+    }
+  });
+});
+
+app.get('/api/posts/:postId/comments', authenticateToken, (req, res) => {
+  const postId = req.params.postId;
+  const postComments = comments.filter(c => c.postId === postId);
+
+  const commentsWithUserInfo = postComments.map(comment => {
+    const user = users.find(u => u.id === comment.userId);
+    return {
+      ...comment,
+      user: {
+        id: user.id,
+        username: user.username,
+        fullName: user.fullName,
+        avatar: user.avatar
+      }
+    };
+  });
+
+  res.json({ comments: commentsWithUserInfo });
+});
+
+app.delete('/api/comments/:commentId', authenticateToken, (req, res) => {
+  const commentIndex = comments.findIndex(c => c.id === req.params.commentId);
+  if (commentIndex === -1) {
+    return res.status(404).json({ error: 'Comment not found' });
+  }
+
+  const comment = comments[commentIndex];
+  if (comment.userId !== req.user.id) {
+    return res.status(403).json({ error: 'Not authorized to delete this comment' });
+  }
+
+  // Update post comments count
+  const postIndex = posts.findIndex(p => p.id === comment.postId);
+  posts[postIndex].commentsCount--;
+
+  comments.splice(commentIndex, 1);
+
+  res.json({ message: 'Comment deleted successfully' });
+});
+
+// Search Routes
+app.get('/api/search/users', authenticateToken, (req, res) => {
+  const { q } = req.query;
+  if (!q) {
+    return res.status(400).json({ error: 'Search query is required' });
+  }
+
+  const searchResults = users.filter(user => 
+    user.username.toLowerCase().includes(q.toLowerCase()) ||
+    user.fullName.toLowerCase().includes(q.toLowerCase())
+  ).map(user => ({
+    id: user.id,
+    username: user.username,
+    fullName: user.fullName,
+    avatar: user.avatar,
+    followersCount: user.followersCount
+  }));
+
+  res.json({ users: searchResults });
+});
+
+// Feed Routes (posts from followed users)
+app.get('/api/feed', authenticateToken, (req, res) => {
+  const page = parseInt(req.query.page) || 1;
+  const limit = parseInt(req.query.limit) || 10;
+
+  // Get users that current user follows
+  const followedUserIds = follows
+    .filter(f => f.followerId === req.user.id)
+    .map(f => f.followingId);
+
+  // Include current user's posts in feed
+  followedUserIds.push(req.user.id);
+
+  // Get posts from followed users
+  const feedPosts = posts.filter(post => followedUserIds.includes(post.userId));
+
+  const startIndex = (page - 1) * limit;
+  const endIndex = startIndex + limit;
+
+  const postsWithUserInfo = feedPosts.slice(startIndex, endIndex).map(post => {
+    const user = users.find(u => u.id === post.userId);
+    const isLiked = likes.some(l => l.postId === post.id && l.userId === req.user.id);
+    
+    return {
+      ...post,
+      user: {
+        id: user.id,
+        username: user.username,
+        fullName: user.fullName,
+        avatar: user.avatar
+      },
+      isLiked
+    };
+  });
+
+  res.json({
+    posts: postsWithUserInfo,
+    hasMore: endIndex < feedPosts.length,
+    totalPosts: feedPosts.length
+  });
+});
+
+// Error handling middleware
+app.use((error, req, res, next) => {
+  if (error instanceof multer.MulterError) {
+    if (error.code === 'LIMIT_FILE_SIZE') {
+      return res.status(400).json({ error: 'File too large' });
+    }
+  }
+  
+  if (error.message === 'Only image files are allowed!') {
+    return res.status(400).json({ error: 'Only image files are allowed' });
+  }
+
+  res.status(500).json({ error: 'Something went wrong!' });
+});
+
+// 404 handler
+app.use('*', (req, res) => {
+  res.status(404).json({ error: 'Route not found' });
+});
+
 app.listen(PORT, () => {
-  console.log(`Server berjalan di port ${PORT}`);
+  console.log(`Server is running on port ${PORT}`);
 });
