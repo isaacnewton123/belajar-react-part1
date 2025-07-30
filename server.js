@@ -286,6 +286,7 @@ app.post("/api/auth/register", async (req, res) => {
         followersCount: user.followersCount,
         followingCount: user.followingCount,
         postsCount: user.postsCount,
+        createdAt: user.createdAt,
       },
     });
   } catch (error) {
@@ -337,6 +338,7 @@ app.post("/api/auth/login", async (req, res) => {
         followersCount: user.followersCount,
         followingCount: user.followingCount,
         postsCount: user.postsCount,
+        createdAt: user.createdAt,
       },
     });
   } catch (error) {
